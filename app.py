@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 if not TOKEN:
     logger.error("TELEGRAM_BOT_TOKEN environment variable is not set!")
-    raise ValueError("TELEGRAM_BOT_TOKEN is required")
+    # Don't raise error here, just log it since Flask might still need to start
 
 # User session data (in-memory for demo)
 user_sessions: Dict[int, Dict] = {}
@@ -72,7 +72,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Send help message"""
-    await start_command(update, context)  # Reuse start for now
+    await start_command(update, context)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle all text messages and button presses"""
@@ -88,7 +88,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Check if awaiting withdrawal address
     if user_sessions[user_id].get('awaiting_withdrawal', False):
-        # Process withdrawal address
         eth_address = message_text.strip()
         if eth_address.startswith('0x') and len(eth_address) == 42:
             response = (
@@ -133,7 +132,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     
     elif message_text == "📊 Trade":
-        # Simulate trading action
         trade_types = ["LONG", "SHORT"]
         assets = ["ETH/USDT", "BTC/USDT", "SOL/USDT"]
         entry_price = round(random.uniform(2500, 3500), 2)
@@ -159,7 +157,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     
     elif message_text == "🚀 Start/Stop Trading":
-        # Toggle trading status
         current_status = user_sessions[user_id]['trading_active']
         user_sessions[user_id]['trading_active'] = not current_status
         
@@ -190,7 +187,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     
     elif message_text == "💸 Withdraw":
-        # Request withdrawal address
         user_sessions[user_id]['awaiting_withdrawal'] = True
         
         response = (
@@ -232,7 +228,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     
     else:
-        # Handle other messages
         await update.message.reply_text(
             "Please use the buttons below to interact with the bot!",
             reply_markup=get_main_keyboard()
@@ -242,25 +237,34 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Log errors"""
     logger.error(f"Update {update} caused error {context.error}")
 
-def setup_bot():
-    """Set up and run the Telegram bot"""
-    # Create Telegram bot application
-    application = Application.builder().token(TOKEN).build()
+# ========== TELEGRAM BOT SETUP FUNCTION ==========
+def setup_and_start_bot():
+    """Set up and run the Telegram bot in a thread"""
+    if not TOKEN:
+        logger.error("Cannot start bot: TELEGRAM_BOT_TOKEN not set!")
+        return
     
-    # Add handlers
-    application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    application.add_error_handler(error_handler)
-    
-    # Start the bot
-    logger.info("🤖 Bot starting polling...")
-    application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+    try:
+        # Create Telegram bot application
+        application = Application.builder().token(TOKEN).build()
+        
+        # Add handlers
+        application.add_handler(CommandHandler("start", start_command))
+        application.add_handler(CommandHandler("help", help_command))
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+        application.add_error_handler(error_handler)
+        
+        # Start the bot
+        logger.info("🤖 Telegram Bot starting polling...")
+        application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+        
+    except Exception as e:
+        logger.error(f"Failed to start Telegram bot: {e}")
 
-# Flask routes
+# ========== FLASK ROUTES ==========
 @app.route('/')
 def home():
-    return "Telegram Demo Trading Bot is running! The bot is active via polling."
+    return "Telegram Demo Trading Bot is running! Bot is active via polling."
 
 @app.route('/health')
 def health():
@@ -268,25 +272,22 @@ def health():
 
 @app.route('/set_webhook', methods=['GET'])
 def set_webhook_page():
-    """Info page about webhook setup (not used for polling)"""
     return "This bot uses polling method. No webhook setup needed.", 200
 
-def start_bot_in_thread():
-    """Start the bot in a separate thread"""
-    try:
-        # Create and run the bot in this thread
-        asyncio.run(setup_bot())
-    except Exception as e:
-        logger.error(f"Bot thread failed: {e}")
-
-if __name__ == '__main__':
-    # Start the Telegram bot in a separate thread
-    logger.info("🚀 Starting application...")
-    bot_thread = threading.Thread(target=start_bot_in_thread, daemon=True)
+# ========== START BOT WHEN MODULE LOADS ==========
+# This runs when gunicorn imports the module
+if TOKEN:
+    # Start the Telegram bot in a separate daemon thread
+    bot_thread = threading.Thread(target=setup_and_start_bot, daemon=True)
     bot_thread.start()
-    logger.info("🤖 Bot thread started successfully")
-    
-    # Start Flask web server
+    logger.info("🚀 Telegram Bot thread started in background")
+else:
+    logger.warning("TELEGRAM_BOT_TOKEN not set. Bot will not start.")
+
+# ========== GUNICORN ENTRY POINT ==========
+# This is what gunicorn calls directly
+if __name__ == '__main__':
+    # This only runs if you execute python app.py directly (local development)
     port = int(os.environ.get('PORT', 5000))
     logger.info(f"🌐 Flask server starting on port {port}")
     app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
