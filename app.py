@@ -2,16 +2,18 @@ import os
 import logging
 import random
 import string
-from typing import Dict, Optional
+import threading
+import asyncio
+from typing import Dict
 from flask import Flask, request
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
+from telegram import Update, KeyboardButton, ReplyKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
 
-# Initialize Flask app for Render
+# Initialize Flask app
 app = Flask(__name__)
 
 # Configure logging
@@ -23,7 +25,9 @@ logger = logging.getLogger(__name__)
 
 # Bot configuration
 TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-WEBHOOK_URL = os.getenv('WEBHOOK_URL', '')
+if not TOKEN:
+    logger.error("TELEGRAM_BOT_TOKEN environment variable is not set!")
+    raise ValueError("TELEGRAM_BOT_TOKEN is required")
 
 # User session data (in-memory for demo)
 user_sessions: Dict[int, Dict] = {}
@@ -44,7 +48,7 @@ def get_main_keyboard():
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Send welcome message with main keyboard"""
     welcome_text = (
         "🤖 *Welcome to Demo Trading Bot!*\n\n"
@@ -65,6 +69,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         'trading_active': False,
         'awaiting_withdrawal': False
     }
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Send help message"""
+    await start_command(update, context)  # Reuse start for now
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle all text messages and button presses"""
@@ -106,7 +114,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Handle button actions
     if message_text == "💰 Deposit":
         eth_address = generate_eth_address()
-        short_address = f"{eth_address[:8]}...{eth_address[-6:]}"
         
         response = (
             f"💎 *Deposit Instructions*\n\n"
@@ -138,7 +145,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📈 *Position:* {random.choice(trade_types)}\n"
             f"💰 *Asset:* {random.choice(assets)}\n"
             f"🎯 *Entry Price:* ${entry_price}\n"
-            f"📊 *Leverage:* {leverager}x\n"
+            f"📊 *Leverage:* {leverage}x\n"
             f"⏰ *Timeframe:* 15m chart\n"
             f"🎯 *Target:* +5% profit\n"
             f"🛑 *Stop Loss:* -2%\n\n"
@@ -235,48 +242,51 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Log errors"""
     logger.error(f"Update {update} caused error {context.error}")
 
-# Flask routes for Render
-@app.route('/')
-def home():
-    return "Telegram Demo Trading Bot is running!"
-
-@app.route('/webhook', methods=['POST'])
-async def webhook():
-    """Handle Telegram webhook requests"""
-    if request.method == "POST":
-        update = Update.de_json(request.get_json(force=True), bot)
-        await application.update_queue.put(update)
-    return "OK"
-
-@app.route('/set_webhook', methods=['GET'])
-async def set_webhook():
-    """Set webhook endpoint (run once after deployment)"""
-    if WEBHOOK_URL:
-        await bot.set_webhook(url=f"{WEBHOOK_URL}/webhook")
-        return f"Webhook set to {WEBHOOK_URL}/webhook"
-    return "WEBHOOK_URL not set"
-
-def main():
-    """Initialize and run the bot"""
+def setup_bot():
+    """Set up and run the Telegram bot"""
     # Create Telegram bot application
     application = Application.builder().token(TOKEN).build()
     
     # Add handlers
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", start))  # Reuse start for help command
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("help", help_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    application.add_handler(CallbackQueryHandler(handle_message))
     application.add_error_handler(error_handler)
     
     # Start the bot
-    logger.info("Bot starting...")
-    application.run_polling()
+    logger.info("🤖 Bot starting polling...")
+    application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+
+# Flask routes
+@app.route('/')
+def home():
+    return "Telegram Demo Trading Bot is running! The bot is active via polling."
+
+@app.route('/health')
+def health():
+    return "OK", 200
+
+@app.route('/set_webhook', methods=['GET'])
+def set_webhook_page():
+    """Info page about webhook setup (not used for polling)"""
+    return "This bot uses polling method. No webhook setup needed.", 200
+
+def start_bot_in_thread():
+    """Start the bot in a separate thread"""
+    try:
+        # Create and run the bot in this thread
+        asyncio.run(setup_bot())
+    except Exception as e:
+        logger.error(f"Bot thread failed: {e}")
 
 if __name__ == '__main__':
-    # For local development
-    if TOKEN:
-        main()
-    else:
-        # For Render deployment
-        port = int(os.environ.get('PORT', 5000))
-        app.run(host='0.0.0.0', port=port)
+    # Start the Telegram bot in a separate thread
+    logger.info("🚀 Starting application...")
+    bot_thread = threading.Thread(target=start_bot_in_thread, daemon=True)
+    bot_thread.start()
+    logger.info("🤖 Bot thread started successfully")
+    
+    # Start Flask web server
+    port = int(os.environ.get('PORT', 5000))
+    logger.info(f"🌐 Flask server starting on port {port}")
+    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
